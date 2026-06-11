@@ -5,9 +5,9 @@ from tagpro_core import TagProCore, Team
 
 
 class ZombiesBot:
-    def __init__(self, presets):
-        self.presets = presets
-        self.group = TagProCore().join_or_create_group("🧟 Zombies 🧟")
+    def __init__(self, presets_path):
+        self.presets_path = presets_path
+        self.group = TagProCore().join_or_create_group("🧟 Zomball 🧟")
         self.group.game.on_game_players_update(self.update_game_player)
         self.group.game.on_event(lambda name, data: name == "tag", self.handle_tag)
         self.group.game.on_event(
@@ -60,10 +60,13 @@ class ZombiesBot:
         )
         self.group.set_team(Team.SPECTATORS, self.group.my_id)
 
+    def sample_preset(self):
+        return random.choice(open(self.presets_path).readlines()).strip()
+
     def setup_and_launch_game(self):
         # prepare map, and move all to red except 1 then launch
         time.sleep(5)
-        self.group.set_preset(random.choice(self.presets))
+        self.group.set_preset(self.sample_preset())
         zombie_id = random.choice(list(self.humans))
         self.group.set_team(Team.BLUE, zombie_id)
         for player_id in set(self.humans) - {zombie_id}:
@@ -83,11 +86,4 @@ class ZombiesBot:
 
 
 if __name__ == "__main__":
-    bot = ZombiesBot(presets=[
-        "gZMefKogggtdoiaaaJyaraaksaaamabsuaaaVadSUadSZnqqdHtzYjbE",
-        # "gZMefKnNggteoiaaaJyaraaksaaamaaEuaaaVadSUadSZnqqdHtzYjbEF",
-        "gZMefKnRggtdoiaaaJyaraaksaaamabsuaaaVadSUadSZnqqdHtzYjbE",
-        "gZMefKoLggtdoiaaaJyaraaksaaamabsuaaaVadSUadSZnqqdHtzYjbE"
-        "gZMefKphggtdoiaaaJyaraaksaaamabsuaaaVnqqUnqqZadSdHtzYTE",
-    ])
-    bot.run()
+    ZombiesBot(presets_path="zomb_presets.txt").run()
