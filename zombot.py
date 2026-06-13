@@ -20,13 +20,14 @@ class ZombiesBot:
         )
 
     def handle_waiting_player(self, data):
-        if self.group.game_active:
+        if self.group.loaded and self.group.game_active:
             self.group.set_team(Team.BLUE, data["id"])
             self.group.launch_game()
 
     @property
     def spectators(self):
-        specballs = {pid for pid, player in self.group.players.items() if player["name"].lower().startswith("spec")}
+        specballs = {pid for pid, player in self.group.players.items()
+                     if player.get("name", "").lower().startswith("spec")}
         return specballs | {self.group.my_id}
 
     @property
@@ -52,10 +53,10 @@ class ZombiesBot:
         # force all players blue so refresh makes you zombie
         for player_id in self.humans:
             self.group.set_team(Team.BLUE, player_id)
-        self.group.send_chat(
-            "Welcome to zomball. If a zombie tags you, refresh to "
-            "automatically turn zombie."
-        )
+        self.group.send_chat("\n".join((
+            "Welcome to zomball. Huballs: stay alive, Zomballs: tag huballs",
+            "If a zomball tags you, refresh to automatically turn zombie."
+        )))
 
     def apply_base_settings(self):
         self.group.set_settings(
@@ -83,13 +84,13 @@ class ZombiesBot:
 
     def run(self):
         while True:
-            print(self.group.lobby)
             time.sleep(2)
-            self.apply_base_settings()
-            if not self.group.game_active:
-                self.group.end_game()
-                if len(self.humans) >= 2:
-                    self.setup_and_launch_game()
+            if self.group.loaded:
+                self.apply_base_settings()
+                if not self.group.game_active:
+                    self.group.end_game()
+                    if len(self.humans) >= 2:
+                        self.setup_and_launch_game()
 
 
 if __name__ == "__main__":

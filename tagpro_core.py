@@ -20,12 +20,8 @@ def setup_logger(name, path):
     if not logger.handlers:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(path)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s - %(levelname)s - %(message)s",
-                "%Y-%m-%d %H:%M:%S",
-            )
-        )
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S")
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
 
     return logger
@@ -36,14 +32,6 @@ class Team(IntEnum):
     BLUE = 2
     SPECTATORS = 3
     WAITING = 4
-
-
-TEAM_KEYS = {
-    Team.RED: "red-team",
-    Team.BLUE: "blue-team",
-    Team.SPECTATORS: "spectators",
-    Team.WAITING: "waiting",
-}
 
 
 class WebSocketHandler:
@@ -84,10 +72,7 @@ class WebSocketHandler:
 
     @property
     def connected(self):
-        return (
-            self.socket.connected
-            and set(self.namespaces).issubset(self.socket.namespaces)
-        )
+        return self.socket.connected and set(self.namespaces).issubset(self.socket.namespaces)
 
     def connect(self):
         with self._emit_lock:
@@ -210,15 +195,15 @@ class TagProCore:
     def __init__(self, *, name=None, base_url="https://tagpro.koalabeast.com", cookie=None):
         self.session = TagProSession(base_url=base_url, cookie=cookie)
         self.group = GroupManager(session=self.session, name=name)
-
         self._instances.append(self)
-        signal.signal(signal.SIGINT, self.cleanup_all)
-        signal.signal(signal.SIGTERM, self.cleanup_all)
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, self.cleanup_all)
 
     def cleanup(self):
         self.group.game.clear_connection()
         self.group.clear_connection()
-        self.session.request("GET", "https://tagpro.koalabeast.com/groups/leave")
+        self.session.request("GET", "/groups/leave")
 
     @classmethod
     def cleanup_all(cls, signum, _frame):
@@ -230,9 +215,8 @@ class TagProCore:
         if self.group.group_id is not None:
             return self.group
 
-        groups = self.list_groups()
         group_id = group_id or next(
-            (group["id"] for group in groups if group["name"] == room_name),
+            (group["id"] for group in self.list_groups() if group["name"] == room_name),
             None,
         ) or self.create_group(room_name)
         if not group_id:
@@ -241,11 +225,11 @@ class TagProCore:
 
     def create_group(self, group_name, pug=True, public=True):
         data = {"name": group_name, "preset": ""}
-        data.update({
-            key: "on"
+        data.update(
+            (key, "on")
             for key, enabled in (("public", public), ("private", pug))
             if enabled
-        })
+        )
         html, final_url = self.session.request("POST", "/groups/create", data)
         return self._group_id(final_url) or self._group_id(html)
 
@@ -256,29 +240,20 @@ class TagProCore:
             match = re.search(pattern, block, re.S)
             return self._clean_html(match.group(1)) if match else default
 
-        return [
-            {
-                "id": self._group_id(block),
-                "name": get(
-                    r'<div class="group-name">\s*(.*?)\s*</div>',
+        return [{
+            "id": self._group_id(block),
+            "name": get(r'<div class="group-name">\s*(.*?)\s*</div>', block),
+            "type": get(r'<div class="pull-right group-type">\s*(.*?)\s*</div>', block),
+            "players": int(get(r"Players:\s*(\d+)", block, 0)),
+            "members": [
+                self._clean_html(member)
+                for member in re.findall(
+                    r'<div class="groupMember[^"]*">(.*?)</div>',
                     block,
-                ),
-                "type": get(
-                    r'<div class="pull-right group-type">\s*(.*?)\s*</div>',
-                    block,
-                ),
-                "players": int(get(r"Players:\s*(\d+)", block, 0)),
-                "members": [
-                    self._clean_html(member)
-                    for member in re.findall(
-                        r'<div class="groupMember[^"]*">(.*?)</div>',
-                        block,
-                        re.S,
-                    )
-                ],
-            }
-            for block in re.split(r'<div class="group-item">', html)[1:]
-        ]
+                    re.S,
+                )
+            ],
+        } for block in html.split('<div class="group-item">')[1:]]
 
     def join_group(self, group_id):
         _, group_url = self.session.request("GET", f"/groups/{group_id}")
@@ -295,42 +270,38 @@ class TagProCore:
 
 
 class GroupManager(WebSocketHandler):
-    DATA_EVENTS = {
-        "groupPresetApply": "preset",
-        "servers": "servers",
-        "touch": "last_touch",
-        "you": "my_id",
+    IGNORED_EVENTS = {
+        "groupPlay", "groupPresetApply", "groupPresetResult", "leader",
+        "private", "pub", "pug", "servers", "touch",
     }
-    TRUE_EVENTS = {"loaded": "loaded"}
-    IGNORED_EVENTS = {"groupPlay", "leader", "pub", "pug"}
 
     def __init__(self, session, name=None, group_url=None):
         self.session = session
-        self.chat_handlers = []
-        self.group_id = None
+        self.group_id = self.game_id = self.my_id = None
+        self.loaded = self._joining_game = False
+        self._end_action = self._touch_task = None
+        self.settings, self.players, self.chats = {}, {}, deque()
         self.game = GameManager(session=session, name=name)
         self.game.on_event(lambda event, data: event == "end", self.end_game)
-        self.ending_game = False
-        self._game_lock = threading.Lock()
-        self._joining_game = False
-        self._launch_after_end = False
-        self._touch_task = None
-        self.settings = {}
-        self.players = {}
-        self.servers = []
-        self.chats = deque()
-        self.is_private = self.preset = None
-        self.game_id = self.game_uuid = None
-        self.game_active = self.loaded = False
-        self.last_touch = self.my_id = None
-        self.lobby_players = self._empty_lobby()
         super().__init__(ws_name=None if name is None else f"group_{name}")
         if group_url is not None:
             self.join(group_url)
 
+    @property
+    def ending_game(self):
+        return self._end_action is not None
+
+    @property
+    def game_active(self):
+        return self.game_id is not None
+
     def join(self, group_url):
         path = urllib.parse.urlparse(group_url).path
         self.group_id = path.rsplit("/", 1)[-1]
+        self.loaded = False
+        self.my_id = self.game_id = None
+        for state in (self.players, self.settings, self.chats):
+            state.clear()
         self.set_connection(
             base_url=self.session.base_url,
             namespace=path,
@@ -347,36 +318,11 @@ class GroupManager(WebSocketHandler):
                 self.handle_launched_game()
             self.socket.sleep(2)
 
-    @property
-    def authed_members(self):
-        return {
-            player["name"]: player_id
-            for player_id, player in self.players.items()
-            if player.get("auth") and player.get("name")
-        }
-
-    @property
-    def lobby(self):
-        lobby = self._empty_lobby()
-
-        for player in self.players.values():
-            lobby[self._team_key(player.get("team"))].append({
-                "name": player.get("name", ""),
-                "location": player.get("location", ""),
-            })
-
-        return lobby
-
-    @property
-    def num_ready_balls(self):
-        return len(self.lobby["red-team"])
-
-    @property
-    def num_in_lobby(self):
-        return sum(len(team) for team in self.lobby.values())
-
     def on_chat(self, handler):
-        self.chat_handlers.append(handler)
+        return self.on_event(
+            lambda name, data: name == "chat" and isinstance(data, dict),
+            handler,
+        )
 
     def send_chat(self, text):
         for line in text.split("\n"):
@@ -393,72 +339,50 @@ class GroupManager(WebSocketHandler):
         self.emit("groupPresetApply", preset)
 
     def launch_game(self):
-        with self._game_lock:
-            if self.ending_game:
-                self._launch_after_end = True
-                return
+        if self.ending_game:
+            self._end_action = "launch"
+            return
         self.emit("groupPlay")
 
     def end_game(self, data=None, *, delay=0):
-        with self._game_lock:
-            if self.ending_game:
-                return False
-            has_game = (
-                self.game_active
-                or self.game_id is not None
-                or self.game.connected
-            )
-            if not has_game:
-                return False
-            self.ending_game = True
+        if self.ending_game or not (self.game_active or self.game.connected):
+            return False
+        self._end_action = "end"
         self.socket.start_background_task(self._end_game, delay)
         return True
 
     def _end_game(self, delay=0):
         self.socket.sleep(delay)
-        with self._game_lock:
-            if not self.ending_game:
-                return
-            self._clear_game()
+        if not self.ending_game:
+            return
+        self.game_id = None
         self.game.clear_connection()
         self.emit("endGame")
 
     def set_team(self, team, player_id=None):
-        self.emit("team", {
-            "id": self.my_id if player_id is None else player_id,
-            "team": team,
-        })
+        player_id = self.my_id if player_id is None else player_id
+        if player_id is None:
+            return False
+        return self.emit("team", {"id": player_id, "team": team})
 
     def set_pug(self, is_pug=True):
-        self.is_private = is_pug
         self.emit("pug" if is_pug else "pub")
-
-    def consume_lobby_changed(self):
-        lobby = self.lobby
-        changed = lobby != self.lobby_players
-        self.lobby_players = lobby
-        return changed
 
     def handle_ws(self, name, data):
         data_dict = data if isinstance(data, dict) else {}
         data_id = data_dict.get("id")
 
-        if name in self.DATA_EVENTS:
-            setattr(self, self.DATA_EVENTS[name], data)
-        elif name in self.TRUE_EVENTS:
-            setattr(self, self.TRUE_EVENTS[name], True)
-        elif name == "play":
-            self.handle_launched_game(force=True)
+        if name == "you":
+            self.my_id = data
+        elif name == "loaded":
+            self.loaded = True
         elif name == "setting":
             key = data_dict.get("name")
             if not key:
                 return False
-            value = data_dict.get("value")
-            self.settings[key] = value
-            if key == "isPrivate":
-                self.is_private = value in (True, 1, "1", "true", "True")
+            self.settings[key] = data_dict.get("value")
         elif name == "chat":
-            self._handle_chat(data)
+            self.handle_chat(data)
         elif name == "member" and data_id:
             self.players.setdefault(data_id, {}).update(data_dict)
         elif name == "removed":
@@ -467,14 +391,11 @@ class GroupManager(WebSocketHandler):
             self.players.setdefault(data_id, {"id": data_id})["team"] = (
                 data_dict.get("team")
             )
-        elif name == "private":
-            self.is_private = bool(data_dict.get("isPrivate"))
         elif name == "game":
-            self._set_game(data_dict.get("gameId"), data_dict.get("gameUuid"))
+            self._set_game(data_dict.get("gameId"))
             self.handle_launched_game()
-        elif name == "port":
-            self._set_game(data)
-            self.handle_launched_game()
+        elif name == "play":
+            self.handle_launched_game(force=True)
         elif name == "endGame":
             self._confirm_game_end()
             self.game.clear_connection()
@@ -482,32 +403,26 @@ class GroupManager(WebSocketHandler):
             return name in self.IGNORED_EVENTS
         return True
 
-    def _set_game(self, game_id, game_uuid=None):
+    def _set_game(self, game_id):
         if game_id is None:
-            self._confirm_game_end()
+            if self.ending_game:
+                self._confirm_game_end()
+            else:
+                self.game_id = None
             return
-        if self.ending_game:
-            return
-        self.game_id = game_id
-        self.game_active = True
-        self.game_uuid = game_uuid or self.game_uuid
-
-    def _clear_game(self):
-        self.game_id = None
-        self.game_active = False
-        self.game_uuid = None
+        if not self.ending_game:
+            self.game_id = game_id
 
     def _confirm_game_end(self, data=None):
-        with self._game_lock:
-            should_launch = self._launch_after_end
-            self.ending_game = self._launch_after_end = False
-            self._clear_game()
+        should_launch = self._end_action == "launch"
+        self._end_action = None
+        self.game_id = None
         if should_launch:
             self.emit("groupPlay")
 
     def handle_launched_game(self, *, force=False):
         blocked = self.ending_game or self.game.connected or self._joining_game
-        if blocked or not (force or self.game_active):
+        if not self.loaded or blocked or not (force or self.game_active):
             return
 
         self._joining_game = True
@@ -532,19 +447,8 @@ class GroupManager(WebSocketHandler):
         finally:
             self._joining_game = False
 
-    def _handle_chat(self, data):
-        self.chats.append(data)
-        if isinstance(data, dict):
-            for handler in self.chat_handlers:
-                handler(data)
-
-    @staticmethod
-    def _empty_lobby():
-        return {key: [] for key in TEAM_KEYS.values()}
-
-    @staticmethod
-    def _team_key(team_id):
-        return TEAM_KEYS[int(team_id)]
+    def handle_chat(self, data):
+        pass
 
 
 class GameManager(WebSocketHandler):
@@ -565,17 +469,18 @@ class GameManager(WebSocketHandler):
             return True
         if name == "p":
             players = data.get("u", []) if isinstance(data, dict) else data
-            if isinstance(players, list):
-                by_id = self.players.get
-                red = next((by_id(p.get("id"), {}) for p in players if p.get("dead") is True and p.get("s-pops") == 1), {})
-                blue = next((by_id(p.get("id"), {}) for p in players if p.get("s-tags", 0) > by_id(p.get("id"), {}).get("s-tags", 0)), {})
-                if red.get("team") == Team.RED and blue.get("team") == Team.BLUE:
-                    self._dispatch_event("tag", (blue, red))
-                changed = False
-                for player in players:
-                    changed = self._update_player(player) or changed
-                if changed:
-                    self._dispatch_event("players", self.players)
+            if not isinstance(players, list):
+                return True
+            by_id = self.players.get
+            red = next((by_id(p.get("id"), {}) | p for p in players if p.get("dead") is True and p.get("s-pops") == 1), {})
+            blue = next((by_id(p.get("id"), {}) | p for p in players if p.get("s-tags", 0) > by_id(p.get("id"), {}).get("s-tags", 0)), {})
+            if red.get("team") == Team.RED and blue.get("team") == Team.BLUE:
+                self._dispatch_event("tag", (blue, red))
+            changed = False
+            for player in players:
+                changed = self._update_player(player) or changed
+            if changed:
+                self._dispatch_event("players", self.players)
             return True
         if name == "playerLeft":
             data_id = data.get("id") if isinstance(data, dict) else data
