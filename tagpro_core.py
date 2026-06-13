@@ -9,6 +9,7 @@ import urllib.request
 from collections import deque
 from enum import IntEnum
 import warnings
+import time
 
 import socketio
 
@@ -36,21 +37,15 @@ class Team(IntEnum):
 
 class WebSocketHandler:
     def __init__(self, ws_name=None, **connection):
-        self.event_handlers = []
+        self.event_handlers, self._tasks = [], []
         self._emit_lock = threading.RLock()
+        self.ws_log = setup_logger(ws_name, f"logs/{ws_name}.txt") if ws_name else None
         self.socket = None
         self.set_connection(**connection)
 
-        self.ws_log = None
-        if ws_name:
-            self.ws_log = setup_logger(ws_name, f"logs/{ws_name}.txt")
-
-    def set_connection(
-        self, *, base_url=None, namespace=None, cookie="", query=None,
-        namespaces=None,
-    ):
+    def set_connection(self, *, base_url=None, namespace=None, cookie="", query=None, namespaces=None):
         with self._emit_lock:
-            if self.socket is not None and self.socket.connected:
+            if self.socket and self.socket.connected:
                 self.socket.disconnect()
             self.base_url = base_url.rstrip("/") if base_url else None
             self.namespace = namespace
@@ -58,84 +53,93 @@ class WebSocketHandler:
             self.query = query or {}
             self.namespaces = namespaces or ([namespace] if namespace else [])
             self.socket = socketio.Client(
-                reconnection=False,
-                logger=False,
-                engineio_logger=False,
-                handle_sigint=False,
+                reconnection=False, logger=False, engineio_logger=False, handle_sigint=False
             )
-            for connected_namespace in self.namespaces:
-                self.socket.on("*", self._receive, namespace=connected_namespace)
-            return self
+            for namespace in self.namespaces:
+                self.socket.on("*", self._receive, namespace=namespace)
+        return self
 
     def clear_connection(self):
         return self.set_connection()
 
     @property
     def connected(self):
-        return self.socket.connected and set(self.namespaces).issubset(self.socket.namespaces)
+        return self.socket.connected and all(namespace in self.socket.namespaces for namespace in self.namespaces)
 
     def connect(self):
         with self._emit_lock:
-            self._connect()
+            if self.connected or not self.base_url or not self.namespace:
+                return self
+            url = self.base_url if not self.query else f"{self.base_url}?{urllib.parse.urlencode(self.query)}"
+            try:
+                self.socket.connect(
+                    url,
+                    headers={"Origin": self.base_url, "Cookie": self.cookie},
+                    namespaces=self.namespaces,
+                    transports=["websocket"],
+                    wait_timeout=10,
+                )
+                for task in self._tasks:
+                    self.socket.start_background_task(task, self.socket)
+            except (socketio.exceptions.ConnectionError, ValueError):
+                pass
         return self
+
+    def register_task(self, task, interval):
+        def loop(socket):
+            while socket is self.socket and self.connected:
+                task()
+                socket.sleep(interval)
+        self._tasks.append(loop)
+        if self.connected:
+            self.socket.start_background_task(loop, self.socket)
+        return task
 
     def emit(self, name, *args):
         with self._emit_lock:
-            if not self._connect():
+            if not self.connect().connected:
                 return False
-            if not args:
-                self.socket.emit(name, namespace=self.namespace)
-            elif len(args) == 1:
-                self.socket.emit(name, args[0], namespace=self.namespace)
-            else:
-                self.socket.emit(name, args, namespace=self.namespace)
+            payload = () if not args else (args[0] if len(args) == 1 else args,)
+            self.socket.emit(name, *payload, namespace=self.namespace)
             return True
 
-    def _connect(self):
-        if not self.base_url or not self.namespace:
-            return False
-        if self.connected:
+    def hook(self, event, handler=None, *args, keys=None, required=(),
+             match=None, dispatch=None, **kwargs):
+        keys = (keys,) if isinstance(keys, str) else keys
+        events = event if isinstance(event, (set, tuple)) else (event,)
+        match = (match or {}).items()
+        required = (required,) if isinstance(required, str) else required or ()
+
+        def run(name, data):
+            data_dict = data if isinstance(data, dict) else {}
+            if not (name in events or callable(event) and event(name, data)):
+                return False
+            if any(not data_dict.get(key) for key in required):
+                return False
+            if any(data_dict.get(key) != value for key, value in match):
+                return False
+            if handler is not None:
+                get = data.get if isinstance(data, dict) else lambda _key: data
+                values = (data,) if keys is None else tuple(get(key) for key in keys)
+                result = handler(*values, *args, **kwargs)
+                if dispatch and result is not None:
+                    self._dispatch_event(*dispatch)
             return True
 
-        url = self.base_url
-        if self.query:
-            url = f"{url}?{urllib.parse.urlencode(self.query)}"
-
-        try:
-            self.socket.connect(
-                url,
-                headers={"Origin": self.base_url, "Cookie": self.cookie},
-                namespaces=self.namespaces,
-                transports=["websocket"],
-                wait_timeout=10,
-            )
-        except (socketio.exceptions.ConnectionError, ValueError):
-            return False
-        return self.connected
-
-    def on_event(self, event, handler):
-        self.event_handlers.append((event, handler))
+        self.event_handlers.append(run)
         return handler
 
     def _receive(self, name, *args):
         data = args[0] if len(args) == 1 else list(args) if args else None
-        handled = self.handle_ws(name, data)
-        handled = self._dispatch_event(name, data) or handled
-
-        handled_str = "" if handled else "UNHANDLED"
+        handled = self._dispatch_event(name, data)
         if self.ws_log:
-            self.ws_log.info("%s: %s %s", handled_str, name, data)
+            self.ws_log.info("%s: %s %s", "" if handled else "UNHANDLED", name, data)
 
     def _dispatch_event(self, name, data):
         handled = False
-        for event, handler in self.event_handlers:
-            if event(name, data):
-                handler(data)
-                handled = True
+        for run in self.event_handlers:
+            handled = run(name, data) or handled
         return handled
-
-    def handle_ws(self, name, data):
-        return False
 
 
 class TagProSession:
@@ -268,22 +272,41 @@ class TagProCore:
     def _clean_html(value):
         return re.sub(r"\s+", " ", re.sub(r"<.*?>", "", value)).strip()
 
+    def daemon(self):
+        while True:
+            time.sleep(1)
+
 
 class GroupManager(WebSocketHandler):
-    IGNORED_EVENTS = {
-        "groupPlay", "groupPresetApply", "groupPresetResult", "leader",
-        "private", "pub", "pug", "servers", "touch",
-    }
+    # Unhandled: "groupPlay", "groupPresetApply", "groupPresetResult", "leader",
+    # "private", "pub", "pug", "servers", "touch",
 
     def __init__(self, session, name=None, group_url=None):
         self.session = session
         self.group_id = self.game_id = self.my_id = None
         self.loaded = self._joining_game = False
-        self._end_action = self._touch_task = None
+        self._end_action = None
         self.settings, self.players, self.chats = {}, {}, deque()
         self.game = GameManager(session=session, name=name)
-        self.game.on_event(lambda event, data: event == "end", self.end_game)
+        self.game.hook("end", self.end_game)
         super().__init__(ws_name=None if name is None else f"group_{name}")
+        self.register_task(self._emit_touch, 2)
+        self.register_task(self.handle_launched_game, 2)
+        players = self.players
+        set_player = players.setdefault
+        self.hook("you", lambda data: setattr(self, "my_id", data))
+        self.hook("loaded", setattr, self, "loaded", True, keys=())
+        self.hook("setting", self.settings.__setitem__, keys=("name", "value"), required="name")
+        self.hook(
+            ("member", "team"),
+            lambda data: set_player(data["id"], {"id": data["id"]}).update(data), required="id"
+        )
+        self.hook("removed", players.pop, None, keys="id")
+        self.hook("game", self._set_game, keys="gameId")
+        self.hook("game", self.handle_launched_game, keys=())
+        self.hook("play", self.handle_launched_game, keys=(), force=True)
+        self.hook("endGame", self._confirm_game_end)
+        self.hook("endGame", self.game.clear_connection, keys=())
         if group_url is not None:
             self.join(group_url)
 
@@ -307,22 +330,10 @@ class GroupManager(WebSocketHandler):
             namespace=path,
             cookie=self.session.cookie_header,
         ).connect()
-        if self._touch_task is None:
-            self._touch_task = self.socket.start_background_task(self._touch_page)
         return self
 
-    def _touch_page(self):
-        while True:
-            self.emit("touch", "game" if self.game_active else "page")
-            if self.game_active:
-                self.handle_launched_game()
-            self.socket.sleep(2)
-
-    def on_chat(self, handler):
-        return self.on_event(
-            lambda name, data: name == "chat" and isinstance(data, dict),
-            handler,
-        )
+    def _emit_touch(self):
+        self.emit("touch", "game" if self.game_active else "page")
 
     def send_chat(self, text):
         for line in text.split("\n"):
@@ -340,8 +351,10 @@ class GroupManager(WebSocketHandler):
 
     def launch_game(self):
         if self.ending_game:
-            self._end_action = "launch"
-            return
+            if self.game_active or self.game.connected:
+                self._end_action = "launch"
+                return
+            self._end_action = None
         self.emit("groupPlay")
 
     def end_game(self, data=None, *, delay=0):
@@ -367,41 +380,6 @@ class GroupManager(WebSocketHandler):
 
     def set_pug(self, is_pug=True):
         self.emit("pug" if is_pug else "pub")
-
-    def handle_ws(self, name, data):
-        data_dict = data if isinstance(data, dict) else {}
-        data_id = data_dict.get("id")
-
-        if name == "you":
-            self.my_id = data
-        elif name == "loaded":
-            self.loaded = True
-        elif name == "setting":
-            key = data_dict.get("name")
-            if not key:
-                return False
-            self.settings[key] = data_dict.get("value")
-        elif name == "chat":
-            self.handle_chat(data)
-        elif name == "member" and data_id:
-            self.players.setdefault(data_id, {}).update(data_dict)
-        elif name == "removed":
-            self.players.pop(data_id, None)
-        elif name == "team" and data_id:
-            self.players.setdefault(data_id, {"id": data_id})["team"] = (
-                data_dict.get("team")
-            )
-        elif name == "game":
-            self._set_game(data_dict.get("gameId"))
-            self.handle_launched_game()
-        elif name == "play":
-            self.handle_launched_game(force=True)
-        elif name == "endGame":
-            self._confirm_game_end()
-            self.game.clear_connection()
-        else:
-            return name in self.IGNORED_EVENTS
-        return True
 
     def _set_game(self, game_id):
         if game_id is None:
@@ -447,50 +425,36 @@ class GroupManager(WebSocketHandler):
         finally:
             self._joining_game = False
 
-    def handle_chat(self, data):
-        pass
-
 
 class GameManager(WebSocketHandler):
+    PLAYER_KEYS = ("name", "team", "s-pops", "s-tags")
+
     def __init__(self, session, name=None, game_url=None):
-        self.session = session
-        self.name = name
-        self.players = {}
-        self.started = False
+        self.session, self.name = session, name
+        self.players, self.started = {}, False
         super().__init__(ws_name=None if name is None else f"game_{name}")
+        players = self.players
+        self.hook("time", setattr, self, "started", True, keys=(), match={"state": 1})
+        self.hook("time")
+        self.hook("p", self._handle_players)
+        self.hook("playerLeft", players.pop, None, keys="id", dispatch=("gamePlayerUpdate", players))
+        self.hook("end", self.clear_connection, keys=())
         if game_url is not None:
             self.join(game_url)
 
-    def handle_ws(self, name, data):
-        if name == "time":
-            self.started = self.started or (
-                isinstance(data, dict) and data.get("state") == 1
-            )
+    def _handle_players(self, data):
+        players = data.get("u", []) if isinstance(data, dict) else data
+        if not isinstance(players, list):
             return True
-        if name == "p":
-            players = data.get("u", []) if isinstance(data, dict) else data
-            if not isinstance(players, list):
-                return True
-            by_id = self.players.get
-            red = next((by_id(p.get("id"), {}) | p for p in players if p.get("dead") is True and p.get("s-pops") == 1), {})
-            blue = next((by_id(p.get("id"), {}) | p for p in players if p.get("s-tags", 0) > by_id(p.get("id"), {}).get("s-tags", 0)), {})
-            if red.get("team") == Team.RED and blue.get("team") == Team.BLUE:
-                self._dispatch_event("tag", (blue, red))
-            changed = False
-            for player in players:
-                changed = self._update_player(player) or changed
-            if changed:
-                self._dispatch_event("players", self.players)
-            return True
-        if name == "playerLeft":
-            data_id = data.get("id") if isinstance(data, dict) else data
-            if self.players.pop(data_id, None) is not None:
-                self._dispatch_event("players", self.players)
-            return True
-        if name == "end":
-            self.clear_connection()
-            return True
-        return False
+
+        popped_once = lambda pl: pl.get("dead") is True and pl.get("s-pops") == 1
+        red = next((self._merged_player(player) for player in players if popped_once(player)), {})
+        blue = next((self._merged_player(player) for player in players if self._tag_incremented(player)), {})
+        if red.get("team") == Team.RED and blue.get("team") == Team.BLUE:
+            self._dispatch_event("tag", (blue, red))
+        if sum(self._update_player(player) for player in players):
+            self._dispatch_event("gamePlayerUpdate", self.players)
+        return True
 
     def clear_connection(self):
         self.players.clear()
@@ -508,27 +472,31 @@ class GameManager(WebSocketHandler):
             cookie=self.session.cookie_header,
         ).connect()
 
-    def on_game_players_update(self, handler):
-        return self.on_event(lambda name, data: name == "players", handler)
+    def _merged_player(self, player):
+        return self.players.get(player.get("id"), {}) | player
+
+    def _tag_incremented(self, player):
+        previous = self.players.get(player.get("id"), {})
+        return player.get("s-tags", 0) > previous.get("s-tags", 0)
 
     def _update_player(self, player):
         if not isinstance(player, dict) or player.get("id") is None:
             return False
+
         data = {
             key: player[key]
-            for key in ("name", "team", "s-pops", "s-tags")
+            for key in self.PLAYER_KEYS
             if key in player
         }
         if not data:
             return False
+
         current = self.players.setdefault(player["id"], {})
-        changed = any(
-            current.get(key) != value
-            for key, value in data.items()
-        )
-        if changed:
-            current.update(data)
-        return changed
+        if all(current.get(key) == value for key, value in data.items()):
+            return False
+
+        current.update(data)
+        return True
 
     def join_from_group(self, *, group_id, selections):
         self.clear_connection()
@@ -542,27 +510,15 @@ class GameManager(WebSocketHandler):
             query={"group": group_id},
         )
 
-        def handle_ws(name, data):
-            data = data if isinstance(data, dict) else {}
-            if name == "ready":
-                joiner.emit("JoinerSelections", selections)
-            elif name == "FoundWorld":
-                game_urls.append(data["url"])
-                found_game.set()
-            elif name == "game" and data.get("gameId"):
-                game_urls.append("/game")
-                found_game.set()
-            return name in {"ready", "FoundWorld", "game"}
-
-        joiner.handle_ws = handle_ws
+        joiner.hook("ready", joiner.emit, "JoinerSelections", selections, keys=())
+        joiner.hook("FoundWorld", game_urls.append, keys="url", required="url")
+        joiner.hook("FoundWorld", found_game.set, keys=(), required="url")
+        joiner.hook("game", game_urls.append, "/game", keys=(), required="gameId")
+        joiner.hook("game", found_game.set, keys=(), required="gameId")
 
         try:
-            joiner.connect()
-            if not joiner.connected or not found_game.wait(15):
-                warnings.warn(
-                    "Timed out waiting for TagPro game.",
-                    stacklevel=2,
-                )
+            if not (joiner.connect().connected and found_game.wait(15)):
+                warnings.warn("Timed out waiting for TagPro game.", stacklevel=2)
                 return None
             return self.join(game_urls[0])
         finally:

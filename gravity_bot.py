@@ -86,7 +86,7 @@ class GravityBot:
     def setup_group(self):
         if self.core.group is None:
             group = self.core.join_or_create_group(self.config["room_name"])
-            group.on_chat(self.handle_chat)
+            group.hook("chat", self.handle_chat)
             self.configure_group(group)
         return self.core.group
 

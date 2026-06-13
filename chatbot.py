@@ -1,16 +1,11 @@
-import time
-
 from tagpro_core import TagProCore
 
 
-class ChatBot:
+class ChatBot(TagProCore):
     def __init__(self):
-        self.group = TagProCore(name="chat").join_or_create_group("💬 Chat 💬")
-
-    def run(self):
-        while True:
-            time.sleep(60)
+        super().__init__(name="chat")
+        self.join_or_create_group("💬 Chat 💬")
 
 
 if __name__ == "__main__":
-    ChatBot().run()
+    ChatBot().daemon()

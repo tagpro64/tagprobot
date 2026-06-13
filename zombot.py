@@ -4,20 +4,23 @@ import time
 from tagpro_core import TagProCore, Team
 
 
-class ZombiesBot:
+class ZombiesBot(TagProCore):
     def __init__(self, presets_path):
+        super().__init__(name="zombot")
         self.presets_path = presets_path
-        self.group = TagProCore(name="zombot").join_or_create_group("🧟 Zomball 🧟")
-        self.group.game.on_game_players_update(self.update_game_player)
-        self.group.game.on_event(lambda name, data: name == "tag", self.handle_tag)
-        self.group.game.on_event(
+        self.group.game.hook("gamePlayerUpdate", self.update_game_player)
+        self.group.game.hook(lambda name, data: name == "tag", self.handle_tag)
+        self.group.game.hook(
             lambda name, data: name == "time" and isinstance(data, dict) and data.get("state") == 1,
             self.force_everyone_blue
         )
-        self.group.on_event(
+        self.group.hook(
             lambda name, data: (name in {"member", "team"} and data.get("team") == Team.WAITING),
             self.handle_waiting_player,
         )
+        self.group.register_task(self.handle_group, 2)
+
+        self.join_or_create_group("🧟 Zomball 🧟")
 
     def handle_waiting_player(self, data):
         if self.group.loaded and self.group.game_active:
@@ -82,16 +85,15 @@ class ZombiesBot:
         self.group.launch_game()
         time.sleep(3)
 
-    def run(self):
-        while True:
-            time.sleep(2)
-            if self.group.loaded:
-                self.apply_base_settings()
-                if not self.group.game_active:
-                    self.group.end_game()
-                    if len(self.humans) >= 2:
-                        self.setup_and_launch_game()
+    def handle_group(self):
+        if not self.group.loaded:
+            return
+        self.apply_base_settings()
+        if not self.group.game_active:
+            self.group.end_game()
+            if len(self.humans) >= 2:
+                self.setup_and_launch_game()
 
 
 if __name__ == "__main__":
-    ZombiesBot(presets_path="zomb_presets.txt").run()
+    ZombiesBot(presets_path="zomb_presets.txt").daemon()
