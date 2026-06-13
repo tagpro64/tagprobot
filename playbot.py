@@ -7,13 +7,11 @@ from tagpro_core import TagProCore
 
 
 class PlayBot(TagProCore):
-
     def __init__(self, group_id):
         super().__init__(name="playbot")
         self.group_id = group_id
         self.pid = None
         self.spawned = False
-        self.tick = 0
         self.keys_down = []
 
         self.group.game.hook("id", lambda pid: setattr(self, "pid", pid))
