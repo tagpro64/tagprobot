@@ -3,9 +3,9 @@ import time
 from tagpro_core import TagProCore
 
 
-class KickBot:
+class ChatBot:
     def __init__(self):
-        self.group = TagProCore().join_or_create_group("💬 Chat 💬")
+        self.group = TagProCore(name="chat").join_or_create_group("💬 Chat 💬")
 
     def run(self):
         while True:
@@ -13,4 +13,4 @@ class KickBot:
 
 
 if __name__ == "__main__":
-    KickBot().run()
+    ChatBot().run()

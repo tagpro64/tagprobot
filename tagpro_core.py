@@ -1,5 +1,7 @@
 import http.cookiejar
 import logging
+from pathlib import Path
+import signal
 import re
 import threading
 import urllib.parse
@@ -16,6 +18,7 @@ def setup_logger(name, path):
     logger.setLevel(logging.INFO)
 
     if not logger.handlers:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(path)
         handler.setFormatter(
             logging.Formatter(
@@ -26,9 +29,6 @@ def setup_logger(name, path):
         logger.addHandler(handler)
 
     return logger
-
-
-ws_log = setup_logger("ws_logger", "ws_log.txt")
 
 
 class Team(IntEnum):
@@ -47,31 +47,37 @@ TEAM_KEYS = {
 
 
 class WebSocketHandler:
-    def __init__(self, **connection):
+    def __init__(self, ws_name=None, **connection):
         self.event_handlers = []
-        self._emit_lock = threading.Lock()
+        self._emit_lock = threading.RLock()
         self.socket = None
         self.set_connection(**connection)
+
+        self.ws_log = None
+        if ws_name:
+            self.ws_log = setup_logger(ws_name, f"logs/{ws_name}.txt")
 
     def set_connection(
         self, *, base_url=None, namespace=None, cookie="", query=None,
         namespaces=None,
     ):
-        if self.socket is not None and self.socket.connected:
-            self.socket.disconnect()
-        self.base_url = base_url.rstrip("/") if base_url else None
-        self.namespace = namespace
-        self.cookie = cookie or ""
-        self.query = query or {}
-        self.namespaces = namespaces or ([namespace] if namespace else [])
-        self.socket = socketio.Client(
-            reconnection=True,
-            logger=False,
-            engineio_logger=False,
-        )
-        for connected_namespace in self.namespaces:
-            self.socket.on("*", self._receive, namespace=connected_namespace)
-        return self
+        with self._emit_lock:
+            if self.socket is not None and self.socket.connected:
+                self.socket.disconnect()
+            self.base_url = base_url.rstrip("/") if base_url else None
+            self.namespace = namespace
+            self.cookie = cookie or ""
+            self.query = query or {}
+            self.namespaces = namespaces or ([namespace] if namespace else [])
+            self.socket = socketio.Client(
+                reconnection=False,
+                logger=False,
+                engineio_logger=False,
+                handle_sigint=False,
+            )
+            for connected_namespace in self.namespaces:
+                self.socket.on("*", self._receive, namespace=connected_namespace)
+            return self
 
     def clear_connection(self):
         return self.set_connection()
@@ -84,20 +90,21 @@ class WebSocketHandler:
         )
 
     def connect(self):
-        self._connect()
+        with self._emit_lock:
+            self._connect()
         return self
 
     def emit(self, name, *args):
-        if not self._connect():
-            return False
         with self._emit_lock:
+            if not self._connect():
+                return False
             if not args:
                 self.socket.emit(name, namespace=self.namespace)
             elif len(args) == 1:
                 self.socket.emit(name, args[0], namespace=self.namespace)
             else:
                 self.socket.emit(name, args, namespace=self.namespace)
-        return True
+            return True
 
     def _connect(self):
         if not self.base_url or not self.namespace:
@@ -117,7 +124,7 @@ class WebSocketHandler:
                 transports=["websocket"],
                 wait_timeout=10,
             )
-        except socketio.exceptions.ConnectionError:
+        except (socketio.exceptions.ConnectionError, ValueError):
             return False
         return self.connected
 
@@ -130,8 +137,9 @@ class WebSocketHandler:
         handled = self.handle_ws(name, data)
         handled = self._dispatch_event(name, data) or handled
 
-        handled_str = "" if handled is False else "UNHANDLED"
-        ws_log.info("%s: %s %s", handled_str, name, data)
+        handled_str = "" if handled else "UNHANDLED"
+        if self.ws_log:
+            self.ws_log.info("%s: %s %s", handled_str, name, data)
 
     def _dispatch_event(self, name, data):
         handled = False
@@ -197,9 +205,26 @@ class TagProSession:
 
 
 class TagProCore:
-    def __init__(self, *, base_url="https://tagpro.koalabeast.com", cookie=None):
+    _instances = []
+
+    def __init__(self, *, name=None, base_url="https://tagpro.koalabeast.com", cookie=None):
         self.session = TagProSession(base_url=base_url, cookie=cookie)
-        self.group = GroupManager(session=self.session)
+        self.group = GroupManager(session=self.session, name=name)
+
+        self._instances.append(self)
+        signal.signal(signal.SIGINT, self.cleanup_all)
+        signal.signal(signal.SIGTERM, self.cleanup_all)
+
+    def cleanup(self):
+        self.group.game.clear_connection()
+        self.group.clear_connection()
+        self.session.request("GET", "https://tagpro.koalabeast.com/groups/leave")
+
+    @classmethod
+    def cleanup_all(cls, signum, _frame):
+        for core in cls._instances:
+            core.cleanup()
+        raise SystemExit(128 + signum)
 
     def join_or_create_group(self, room_name, group_id=None):
         if self.group.group_id is not None:
@@ -279,11 +304,11 @@ class GroupManager(WebSocketHandler):
     TRUE_EVENTS = {"loaded": "loaded"}
     IGNORED_EVENTS = {"groupPlay", "leader", "pub", "pug"}
 
-    def __init__(self, *, session, group_url=None):
+    def __init__(self, session, name=None, group_url=None):
         self.session = session
         self.chat_handlers = []
         self.group_id = None
-        self.game = GameManager(session=session)
+        self.game = GameManager(session=session, name=name)
         self.game.on_event(lambda event, data: event == "end", self.end_game)
         self.ending_game = False
         self._game_lock = threading.Lock()
@@ -299,7 +324,7 @@ class GroupManager(WebSocketHandler):
         self.game_active = self.loaded = False
         self.last_touch = self.my_id = None
         self.lobby_players = self._empty_lobby()
-        super().__init__()
+        super().__init__(ws_name=None if name is None else f"group_{name}")
         if group_url is not None:
             self.join(group_url)
 
@@ -523,11 +548,12 @@ class GroupManager(WebSocketHandler):
 
 
 class GameManager(WebSocketHandler):
-    def __init__(self, *, session, game_url=None):
+    def __init__(self, session, name=None, game_url=None):
         self.session = session
+        self.name = name
         self.players = {}
         self.started = False
-        super().__init__()
+        super().__init__(ws_name=None if name is None else f"game_{name}")
         if game_url is not None:
             self.join(game_url)
 
@@ -604,6 +630,7 @@ class GameManager(WebSocketHandler):
         found_game = threading.Event()
         game_urls = []
         joiner = WebSocketHandler(
+            ws_name=None if self.name is None else f"joiner_{self.name}",
             base_url=self.session.base_url,
             namespace="/games/find",
             cookie=self.session.cookie_header,

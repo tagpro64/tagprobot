@@ -7,7 +7,7 @@ from tagpro_core import TagProCore, Team
 class ZombiesBot:
     def __init__(self, presets_path):
         self.presets_path = presets_path
-        self.group = TagProCore().join_or_create_group("🧟 Zomball 🧟")
+        self.group = TagProCore(name="zombot").join_or_create_group("🧟 Zomball 🧟")
         self.group.game.on_game_players_update(self.update_game_player)
         self.group.game.on_event(lambda name, data: name == "tag", self.handle_tag)
         self.group.game.on_event(
@@ -25,8 +25,13 @@ class ZombiesBot:
             self.group.launch_game()
 
     @property
+    def spectators(self):
+        specballs = {pid for pid, player in self.group.players.items() if player["name"].lower().startswith("spec")}
+        return specballs | {self.group.my_id}
+
+    @property
     def humans(self):
-        return set(self.group.players) - {self.group.my_id}
+        return set(self.group.players) - self.spectators
 
     def update_game_player(self, players):
         if not self.group.game.started:
@@ -58,7 +63,8 @@ class ZombiesBot:
             blueTeamName="Zomballs",
             redTeamName="Huballs",
         )
-        self.group.set_team(Team.SPECTATORS, self.group.my_id)
+        for spec in self.spectators:
+            self.group.set_team(Team.SPECTATORS, spec)
 
     def sample_preset(self):
         return random.choice(open(self.presets_path).readlines()).strip()
@@ -77,6 +83,7 @@ class ZombiesBot:
 
     def run(self):
         while True:
+            print(self.group.lobby)
             time.sleep(2)
             self.apply_base_settings()
             if not self.group.game_active:
