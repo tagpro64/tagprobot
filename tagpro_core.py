@@ -431,7 +431,7 @@ class GameManager(WebSocketHandler):
 
     def __init__(self, session, name=None, game_url=None):
         self.session, self.name = session, name
-        self.players, self.started = {}, False
+        self.players, self.started, self.tick = {}, False, 0
         super().__init__(ws_name=None if name is None else f"game_{name}")
         players = self.players
         self.hook("time", setattr, self, "started", True, keys=(), match={"state": 1})
@@ -471,6 +471,17 @@ class GameManager(WebSocketHandler):
             namespace="/",
             cookie=self.session.cookie_header,
         ).connect()
+
+    def key_down(self, key):
+        self.tick += 1
+        return self.emit("keydown", {"k": key, "t": self.tick})
+
+    def key_up(self, key):
+        self.tick += 1
+        return self.emit("keyup", {"k": key, "t": self.tick})
+
+    def key_tap(self, key):
+        return self.key_down(key) and self.key_up(key)
 
     def _merged_player(self, player):
         return self.players.get(player.get("id"), {}) | player

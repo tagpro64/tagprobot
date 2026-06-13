@@ -22,13 +22,15 @@ class PlayBot(TagProCore):
         self.join_group(self.group_id)
 
     def move(self):
-        KEYS = ("up", "up", "left", "right")
-        event = "keyup" if self.keys_down else "keydown"
-        keys = self.keys_down or random.sample(KEYS, random.randint(1, len(KEYS)))
-        for key in keys:
-            self.tick += 1
-            self.group.game.emit(event, {"k": key, "t": self.tick})
-        self.keys_down = [] if self.keys_down else keys
+        keys_down = random.sample(("up", "up", "left", "right"), random.randint(1, 4))
+        self.keys_down.extend(keys_down)
+        keys_up = random.sample(self.keys_down, random.randint(1, len(self.keys_down)))
+
+        for key in keys_down:
+            self.group.game.key_down(key)
+        for key in keys_up:
+            self.group.game.key_up(key)
+            self.keys_down.remove(key)
 
     def refresh_if_dead(self, data):
         players = data.get("u", []) if isinstance(data, dict) else []
