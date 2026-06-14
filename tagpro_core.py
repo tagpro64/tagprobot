@@ -335,7 +335,8 @@ class GroupManager(WebSocketHandler):
         return self
 
     def _emit_touch(self):
-        self.emit("touch", "game" if self.game_active else "page")
+        location = "game" if self.game_active else "page"
+        self.emit("touch", "joining" if self._joining_game else location)
 
     def send_chat(self, text):
         for line in text.split("\n"):

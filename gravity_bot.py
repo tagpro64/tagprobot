@@ -183,7 +183,7 @@ class GravityBot(TagProCore):
         super().__init__(name="grav_bot")
         self.settings = dict(config["map_defaults"])
         self.current_preset = None
-        self.current_game_preset = self.launching_preset = None
+        self.current_game_preset = self.launching_at = None
 
         values = {
             "discord_link": config.get("discord_link", ""),
@@ -234,10 +234,10 @@ class GravityBot(TagProCore):
 
         if len(self.group.players) == 1:
             self.settings = dict(self.config["map_defaults"])
-            self.current_preset = self.launching_preset = None
+            self.current_preset = self.launching_at = None
             return
 
-        if not (self.current_preset or self.launching_preset):
+        if not (self.current_preset or self.launching_at):
             maps = self.legal_maps(self.settings)
             if not maps:
                 self.settings = dict(self.config["map_defaults"])
@@ -249,8 +249,8 @@ class GravityBot(TagProCore):
 
     def handle_game(self, game_id):
         if game_id is not None:
-            self.current_game_preset = self.launching_preset
-            self.launching_preset = None
+            self.current_game_preset = self.current_preset
+            self.current_preset = self.launching_at = None
         elif self.current_game_preset:
             self.group.send_chat(self.config["end_message"])
             self.current_game_preset = None
@@ -305,7 +305,7 @@ class GravityBot(TagProCore):
                         return message.format(sender=sender)
             return "Not authorized"
         if command == "SETTINGS":
-            self.current_preset = self.launching_preset = None
+            self.current_preset = self.launching_at = None
             return self.update_settings(arg)
 
     def launchnew(self, message):
@@ -377,7 +377,7 @@ class GravityBot(TagProCore):
 
     def maybe_launch(self, *, end_current=False):
         if (
-            self.launching_preset
+            self.launching_at and time.time() - self.launching_at < 45
             or self.group.ending_game
             or not self.current_preset
             or not self.num_ready_balls
@@ -385,8 +385,7 @@ class GravityBot(TagProCore):
         ):
             return
 
-        self.launching_preset = self.current_preset
-        self.current_preset = None
+        self.launching_at = time.time()
         if end_current:
             self.group.end_game()
         self.group.launch_game()
