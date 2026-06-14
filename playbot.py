@@ -22,10 +22,10 @@ class PlayBot(TagProCore):
     def move(self):
         keys_down = random.sample(("up", "up", "left", "right"), random.randint(1, 4))
         self.keys_down.extend(keys_down)
-        keys_up = random.sample(self.keys_down, random.randint(1, len(self.keys_down)))
-
         for key in keys_down:
             self.group.game.key_down(key)
+
+        keys_up = random.sample(self.keys_down, random.randint(1, len(self.keys_down)))
         for key in keys_up:
             self.group.game.key_up(key)
             self.keys_down.remove(key)
