@@ -88,8 +88,6 @@ class ZombiesBot(TagProCore):
         time.sleep(3)
 
     def handle_group(self):
-        if not self.group.loaded:
-            return
         self.apply_base_settings()
         if not self.group.game_active:
             self.group.end_game()
