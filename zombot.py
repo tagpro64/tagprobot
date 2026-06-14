@@ -8,6 +8,7 @@ class ZombiesBot(TagProCore):
     def __init__(self, presets_path):
         super().__init__(name="zombot")
         self.presets_path = presets_path
+        self.first_tagged_id = None
         self.group.game.hook("gamePlayerUpdate", self.update_game_player)
         self.group.game.hook(lambda name, data: name == "tag", self.handle_tag)
         self.group.game.hook(
@@ -29,8 +30,10 @@ class ZombiesBot(TagProCore):
 
     @property
     def spectators(self):
-        specballs = {pid for pid, player in self.group.players.items()
-                     if player.get("name", "").lower().startswith("spec")}
+        specballs = {
+            pid for pid, player in self.group.players.items()
+            if player.get("name", "").lower().startswith("spec")
+        }
         return specballs | {self.group.my_id}
 
     @property
@@ -49,6 +52,8 @@ class ZombiesBot(TagProCore):
 
     def handle_tag(self, players):
         blue, red = players
+        if self.first_tagged_id is None:
+            self.first_tagged_id = red.get("sessionId") or ""
         action = random.choice(["zombified", "CHOMPED", "zombstepped", "slaughtered", "devoured", "consumed"])
         self.group.send_chat(f"[¬º-°]¬ *{blue['name']}* {action} *{red['name']}*")
 
@@ -77,9 +82,13 @@ class ZombiesBot(TagProCore):
         # prepare map, and move all to red except 1 then launch
         time.sleep(5)
         self.group.set_preset(self.sample_preset())
-        zombie_id = random.choice(list(self.humans))
+        human_ids = self.humans
+        zombie_id = self.first_tagged_id
+        if zombie_id not in human_ids:
+            zombie_id = random.choice(list(human_ids))
+        self.first_tagged_id = None
         self.group.set_team(Team.BLUE, zombie_id)
-        for player_id in set(self.humans) - {zombie_id}:
+        for player_id in human_ids - {zombie_id}:
             self.group.set_team(Team.RED, player_id)
         time.sleep(5)
         self.group.launch_game()

@@ -427,7 +427,7 @@ class GroupManager(WebSocketHandler):
 
 
 class GameManager(WebSocketHandler):
-    PLAYER_KEYS = ("name", "team", "s-pops", "s-tags")
+    PLAYER_KEYS = ("sessionId", "name", "team", "s-pops", "s-tags")
 
     def __init__(self, session, name=None, game_url=None):
         self.session, self.name = session, name
@@ -528,7 +528,7 @@ class GameManager(WebSocketHandler):
         joiner.hook("game", found_game.set, keys=(), required="gameId")
 
         try:
-            if not (joiner.connect().connected and found_game.wait(15)):
+            if not (joiner.connect().connected and found_game.wait(30)):
                 warnings.warn("Timed out waiting for TagPro game.", stacklevel=2)
                 return None
             return self.join(game_urls[0])
