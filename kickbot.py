@@ -12,9 +12,9 @@ class KickBot(TagProCore):
     def kick_player(self, data):
         player_id = data.get("id")
         if player_id is not None and player_id != self.group.my_id:
-            time.sleep(2)
-            self.group.send_chat("wtf, who are you")
             time.sleep(3)
+            self.group.send_chat("wtf, who are you")
+            time.sleep(2)
             self.group.emit("kick", player_id)
 
 
