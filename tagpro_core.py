@@ -55,6 +55,7 @@ class WebSocketHandler:
             self.socket = socketio.Client(
                 reconnection=False, logger=False, engineio_logger=False, handle_sigint=False
             )
+            self.last_received = time.time()
             for namespace in self.namespaces:
                 self.socket.on("*", self._receive, namespace=namespace)
         return self
@@ -130,6 +131,7 @@ class WebSocketHandler:
         return handler
 
     def _receive(self, name, *args):
+        self.last_received = time.time()
         data = args[0] if len(args) == 1 else list(args) if args else None
         handled = self._dispatch_event(name, data)
         if self.ws_log:
@@ -399,7 +401,8 @@ class GroupManager(WebSocketHandler):
             self.emit("groupPlay")
 
     def handle_launched_game(self, *, force=False):
-        blocked = self.ending_game or self.game.connected or self._joining_game
+        fresh_game = self.game.connected and time.time() - self.game.last_received < 5
+        blocked = self.ending_game or self._joining_game or fresh_game
         if not self.loaded or blocked or not (force or self.game_active):
             return
 
@@ -420,7 +423,7 @@ class GroupManager(WebSocketHandler):
                     "spectate": False,
                 },
             )
-            if res is None:
+            if res is None and not self.game_active:
                 self.end_game()
         finally:
             self._joining_game = False
@@ -531,6 +534,7 @@ class GameManager(WebSocketHandler):
             if not (joiner.connect().connected and found_game.wait(30)):
                 warnings.warn("Timed out waiting for TagPro game.", stacklevel=2)
                 return None
-            return self.join(game_urls[0])
+            self.join(game_urls[0])
+            return self if self.connected else None
         finally:
             joiner.clear_connection()

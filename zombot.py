@@ -13,7 +13,7 @@ class ZombiesBot(TagProCore):
         self.group.game.hook(lambda name, data: name == "tag", self.handle_tag)
         self.group.game.hook(
             lambda name, data: name == "time" and isinstance(data, dict) and data.get("state") == 1,
-            self.force_everyone_blue
+            self.handle_game_start
         )
         self.group.hook(
             lambda name, data: (name in {"member", "team"} and data.get("team") == Team.WAITING),
@@ -57,7 +57,7 @@ class ZombiesBot(TagProCore):
         action = random.choice(["zombified", "CHOMPED", "zombstepped", "slaughtered", "devoured", "consumed"])
         self.group.send_chat(f"[¬º-°]¬ *{blue['name']}* {action} *{red['name']}*")
 
-    def force_everyone_blue(self, data):
+    def handle_game_start(self, data):
         # force all players blue so refresh makes you zombie
         for player_id in self.humans:
             self.group.set_team(Team.BLUE, player_id)
