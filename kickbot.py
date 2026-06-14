@@ -6,7 +6,7 @@ from tagpro_core import TagProCore
 class KickBot(TagProCore):
     def __init__(self):
         super().__init__(name="kickbot")
-        self.group.hook(lambda name, data: name == "member", self.kick_player)
+        self.group.hook("member", self.kick_player)
         self.join_or_create_group("🥾 Kick 🥾")
 
     def kick_player(self, data):
