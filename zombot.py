@@ -10,17 +10,10 @@ class ZombiesBot(TagProCore):
         self.presets_path = presets_path
         self.first_tagged_id = None
         self.group.game.hook("gamePlayerUpdate", self.update_game_player)
-        self.group.game.hook(lambda name, data: name == "tag", self.handle_tag)
-        self.group.game.hook(
-            lambda name, data: name == "time" and isinstance(data, dict) and data.get("state") == 1,
-            self.handle_game_start
-        )
-        self.group.hook(
-            lambda name, data: (name in {"member", "team"} and data.get("team") == Team.WAITING),
-            self.handle_waiting_player,
-        )
+        self.group.game.hook("tag", self.handle_tag)
+        self.group.game.hook("time", self.handle_game_start, match={"state": 1})
+        self.group.hook({"member", "team"}, self.handle_waiting_player, match={"team": Team.WAITING})
         self.group.register_task(self.handle_group, 2)
-
         self.join_or_create_group("🧟 Zomball 🧟")
 
     def handle_waiting_player(self, data):
